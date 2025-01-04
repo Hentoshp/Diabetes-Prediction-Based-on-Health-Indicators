@@ -1,0 +1,340 @@
+---
+title: "MATH 6357 Project"
+author: "Pierce Hentosh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Required Libraries
+library(tidyverse)
+library(haven)
+library(leaps)
+library(boot)
+library(car)
+
+```
+
+
+
+
+
+```{r}
+
+# reading in diabetes dataset
+diabetes_dataset_raw = read_csv("diabetes.csv")
+
+# dropping NA values from glyhb and time.ppn columns
+diabetes_dataset_raw = drop_na(diabetes_dataset_raw, 
+                               c(glyhb, time.ppn))
+# subsetting data removing frame, bp.2s, and bp.2d cols
+dataset_imputed = subset(diabetes_dataset_raw, 
+                         select = -c(frame, bp.2s, bp.2d))
+
+summary(dataset_imputed)
+
+# imputing missing values with mean of column, grouped by gender
+diabetes_data_imputed = dataset_imputed %>% 
+  group_by(gender) %>%
+  select(where(is.numeric)) %>% 
+  mutate(across(where(is.numeric), ~ replace(., is.na(.), mean(., na.rm = TRUE))))
+summary(diabetes_data_imputed)
+
+# readding location col
+location_column <- diabetes_dataset_raw$location
+diabetes_data_imputed_with_location <- bind_cols(
+  diabetes_data_imputed, 
+  location = location_column
+)
+
+# removing id column
+diabetes_data_imputed_with_location = subset(diabetes_data_imputed_with_location, 
+                                             select = -id)
+
+# creating new csv file for cleaned data
+write_csv(diabetes_data_imputed_with_location, 
+          "diabetes_data_clean.csv")
+
+```
+
+
+
+
+
+
+
+
+```{r}
+# reading in clean data
+data = read_csv("diabetes_data_clean.csv")
+
+# fitting initial model
+diabetes_lm_inital = lm (glyhb ~ ., data)
+
+# VIF of initial
+vif(diabetes_lm_inital)
+
+# calculating map column based on BP variables
+data$map = data$bp.1d + (1/3)*(data$bp.1s - data$bp.1d)
+
+# removing bp cols from data
+data = subset(data, 
+              select = -c(bp.1s, bp.1d))
+
+
+# calculating hip/waist column
+data$waist_hip_ratio = data$waist / data$hip
+
+# removing waist, hip, and ratio columns
+data = subset(data, 
+              select = -c(waist, hip, ratio))
+
+# fitting reduced model
+diabetes_lm_full = lm(glyhb ~ ., data)
+summary(diabetes_lm_full)
+
+# checking VIF of reduced model
+vif(diabetes_lm_full)
+
+
+
+# transforming glyhb and stab.glu col with log
+data$transformed_glyhb = log(data$glyhb)
+data$transformed_stab.glu = log(data$stab.glu)
+
+# removing non-transformed col
+data = subset(data, 
+              select = -c(glyhb, stab.glu))
+
+data_sub = data
+
+# fitting new model
+diabetes_lm = lm(transformed_glyhb ~ ., data_sub)
+summary(diabetes_lm)
+
+# performing best subset regression
+regsub = regsubsets(transformed_glyhb ~., data_sub)
+reg_summary = summary(regsub)
+reg_summary
+names(reg_summary)
+
+# plotting adjr2 and cp
+plot(reg_summary$adjr2, 
+     xlab = "No. of variables", 
+     ylab = "Adjusted R-square", 
+     type = "l" )
+
+plot(reg_summary$cp, 
+     xlab = "No. of variables", 
+     ylab = "Cp values", 
+     type = "l" )
+
+# plotting regsub results
+plot(regsub, scale = "adjr2")
+plot(regsub, scale = "Cp")
+plot(regsub, scale = "bic")
+
+```
+
+
+
+
+
+```{r}
+
+# creating studentized residuals
+studentized_residuals = rstudent(diabetes_lm)
+
+# plotting studentized residuals with boundary
+plot(studentized_residuals, 
+     type = "o", 
+     xlab = "Case Index", 
+     main = "Studentized Residuals")
+
+# boundary lines
+abline(h = 3, col = "red")
+abline(h = -3, col = "red")
+
+# labeling points
+text(studentized_residuals, 
+     type = "o", 
+     lables = rownames(diabetes_lm))
+
+
+
+# plotting leverage values with boundaries
+h_values = hatvalues(diabetes_lm)
+
+plot(h_values, 
+     type = "o", 
+     main = "Leverage Values", 
+     ylab = "Hat values", 
+     xlab = "index")
+
+# calculating boundary
+n <- nrow(data_sub)
+p <- length(coef(diabetes_lm))  # Number of predictors + intercept
+abline(h = (2 * p) / n, col = "red")
+text(h_values, type = "o", lables = rownames(diabetes_lm))
+
+# plotting DFFITs
+plot(dffits(diabetes_lm), 
+     type = "o", 
+     main = "DFFITs Plot", 
+     xlab = "Observation", 
+     ylab = "DFITs")
+
+# boundary lines and labels
+abline(h = c(2*sqrt(p/n), -(2*sqrt(p/n)), col = "red")) 
+text(x = 1:length(dffits(diabetes_lm)), 
+     y = dffits(diabetes_lm), 
+     labels = rownames(data.frame(dffits(diabetes_lm))), 
+     pos = 4)
+
+
+# plotting DFBETAs plot
+threshold = 2*sqrt(p/n)
+dfbetas_values = dfbetas(diabetes_lm)
+
+# looping over each predictor and creating DFBETA plot
+par(mfrow = c(2, 2))
+for (i in 1:ncol(dfbetas_values)) {
+  plot(dfbetas_values[, i], type = "h",
+       main = paste("DFBETAs for ", colnames(dfbetas_values)[i]),
+       xlab = "Observation", ylab = "DFBETAs")
+  abline(h = c(threshold, -threshold), col = "red", lty = 2)
+}
+par(mfrow = c(1, 1))
+
+
+# Plotting Cook's Distance with boundary
+plot(cooks.distance(diabetes_lm), 
+     type = "o", 
+     main = "Cook's Distance", 
+     xlab = "Case Index", 
+     ylab = "Cook's Distance",
+     ylim = c(0, 1))
+
+abline(h = 1, col = "red")
+
+
+
+# checking VIF
+vif(diabetes_lm)
+
+# examining specific outlier points for possible removal
+outliers = data_sub[c(61, 187, 320, 349), ]
+outliers
+
+```
+
+
+
+```{r}
+
+# repeating same outlier process above, but using reduced model
+
+diabetes_lm_reduced = lm(transformed_glyhb ~ chol + transformed_stab.glu + hdl + age + time.ppn + chol*hdl, data = data_sub)
+
+
+# creating studentized residuals
+studentized_residuals = rstudent(diabetes_lm_reduced)
+
+# plotting studentized residuals with boundary
+plot(studentized_residuals, 
+     type = "o", 
+     xlab = "Case Index", 
+     main = "Studentized Residuals")
+
+# boundary lines
+abline(h = 3, col = "red")
+abline(h = -3, col = "red")
+
+# labeling points
+text(studentized_residuals, 
+     type = "o", 
+     lables = rownames(diabetes_lm_reduced))
+
+
+
+# plotting leverage values with boundaries
+h_values = hatvalues(diabetes_lm_reduced)
+
+plot(h_values, 
+     type = "o", 
+     main = "Leverage Values", 
+     ylab = "Hat values", 
+     xlab = "index")
+
+# calculating boundary
+n <- nrow(data_sub)
+p <- length(coef(diabetes_lm_reduced))  # Number of predictors + intercept
+abline(h = (2 * p) / n, col = "red")
+text(h_values, type = "o", lables = rownames(diabetes_lm_reduced))
+
+# plotting DFFITs
+plot(dffits(diabetes_lm_reduced), 
+     type = "o", 
+     main = "DFFITs Plot", 
+     xlab = "Observation", 
+     ylab = "DFITs")
+
+# boundary lines and labels
+abline(h = c(2*sqrt(p/n), -(2*sqrt(p/n)), col = "red")) 
+text(x = 1:length(dffits(diabetes_lm_reduced)), 
+     y = dffits(diabetes_lm_reduced), 
+     labels = rownames(data.frame(dffits(diabetes_lm_reduced))), 
+     pos = 4)
+
+
+# plotting DFBETAs plot
+threshold = 2*sqrt(p/n)
+dfbetas_values = dfbetas(diabetes_lm_reduced)
+
+# looping over each predictor and creating DFBETA plot
+par(mfrow = c(2, 2))
+for (i in 1:ncol(dfbetas_values)) {
+  plot(dfbetas_values[, i], type = "h",
+       main = paste("DFBETAs for ", colnames(dfbetas_values)[i]),
+       xlab = "Observation", ylab = "DFBETAs")
+  abline(h = c(threshold, -threshold), col = "red", lty = 2)
+}
+par(mfrow = c(1, 1))
+
+
+# Plotting Cook's Distance with boundary
+plot(cooks.distance(diabetes_lm_reduced), 
+     type = "o", 
+     main = "Cook's Distance", 
+     xlab = "Case Index", 
+     ylab = "Cook's Distance", 
+     ylim = c(0, 1))
+
+abline(h = 1, col = "red")
+
+
+
+# checking VIF
+vif(diabetes_lm_reduced)
+
+# examining specific outlier points for possible removal
+outliers = data_sub[c(61, 187, 320, 349), ]
+outliers
+
+
+
+
+
+
+
+
+
+
+
+```
+
